@@ -1,15 +1,46 @@
 #!/usr/bin/env python3
 import os, sys, re, json, logging as log, threading, urllib3, requests
 from time import time, sleep
+import queue
 DEBUG = 0#+1
 CONFIG = sys.argv[1] if len(sys.argv)>1 else 'config.json' # take cli arg or default
 CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG) # relative to file
 # CONFIG = '/etc/jlu.conf' # force a config file here
 RETRIES = 100
 TIMEOUT = 2
-INTERVAL = 0.5
+INTERVAL = 2
+MAX_USERS = 64
+MAX_THREADS = 10
 
-def runTask(task):
+class taskRunner(threading.Thread):
+	def __init__(self,queue:queue.Queue) -> None:
+		threading.Thread.__init__(self)
+		self.queue = queue
+		self.sigkill = False
+
+	def stop(self):
+		self.sigkill = True
+
+	def run(self):
+		while not self.sigkill:
+			try:
+				task = self.queue.get(block=True, timeout=10)
+			except queue.Empty:
+				self.sigkill=True
+				break
+			result = runTask(task)
+			self.queue.task_done()
+			if result:
+				if self.queue.qsize()>0:
+					log.info(f"{self.queue.qsize} tasks left.")
+					continue
+				elif self.queue.qsize()==0:
+					self.sigkill=True
+					break
+			self.queue.put(task,block=True,timeout=None)
+			log.info(f"{task['transaction']}:{task['username']} failed, re-appending task.")
+
+def runTask(task) -> bool:
 	for _ in range(RETRIES):
 		try:
 			s = requests.Session()
@@ -53,12 +84,13 @@ def runTask(task):
 			log.debug(f"Result: {r.text}")
 			if json.loads(r.content)['ecode'] != 'SUCCEED' :
 				raise Exception('The server returned a non-successful status.')
-			log.info('Success!')
-			return
+			log.info(f"{task['transaction']}:{task['username']} Success!")
+			return True
 		except Exception as e:
 			log.error(e)
 			sleep(TIMEOUT)
 	log.error('Failed too many times, exiting...')
+	return False
 
 log.basicConfig(
 	level=log.INFO-10*DEBUG,
@@ -66,7 +98,7 @@ log.basicConfig(
 )
 log.warning('Started.')
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
+taskList = queue.Queue(MAX_USERS)
 log.info(f'Reading config from {CONFIG}')
 config = json.load(open(CONFIG))
 for task in config.get('tasks', [{}]):
@@ -75,9 +107,10 @@ for task in config.get('tasks', [{}]):
 	for k in ['fields', 'conditions']:
 		task[k] = {**config.get(k, {}), **task.get(k, {})}
 	if task['transaction']:
-		threading.Thread(
-			target=runTask,
-			name=f"{task['transaction']}:{task['username']}",
-			args=(task,)
-		).start()
+		taskList.put(task,block=True,timeout=None)
+		log.info(f"{task['transaction']}:{task['username']} queued.")
+for _ in range(MAX_THREADS):
+	taskRunner(taskList).start()
 	sleep(INTERVAL)
+taskList.join()
+log.info('All Completed.')
