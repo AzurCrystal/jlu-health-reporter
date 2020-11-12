@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
-import os, sys, re, json, logging as log, threading, urllib3, requests
+import os, sys, re, json, random, logging as log, threading, urllib3, requests
+from queue import Queue
 from time import time, sleep
 import queue
 DEBUG = 0#+1
 CONFIG = sys.argv[1] if len(sys.argv)>1 else 'config.json' # take cli arg or default
 CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG) # relative to file
 # CONFIG = '/etc/jlu.conf' # force a config file here
+# times to retry a failed task for a thread
 RETRIES = 20
-TIMEOUT = 20
-INTERVAL = 10
+# network timeout & retry interval
+TIMEOUT = 10
+# time between worker thread start
+INTERVAL = 20
+# Max Queue Size for tasks.
+# !!！Should be at least larger than tasks in config.
 MAX_USERS = 64
+# Max Threads Work at the same time.
+# Not Supposed to turn too much, unless users are more than 64.
 MAX_THREADS = 5
+#Delay each task to lower the load
+RAND_DELAY = 10*60
 
 class taskRunner(threading.Thread):
 	def __init__(self,queue:queue.Queue) -> None:
@@ -28,6 +38,7 @@ class taskRunner(threading.Thread):
 			except queue.Empty:
 				self.sigkill=True
 				break
+			#sleep(random.random()*RAND_DELAY) #not necessary
 			result = runTask(task)
 			self.queue.task_done()
 			if result:
@@ -37,7 +48,12 @@ class taskRunner(threading.Thread):
 				elif self.queue.qsize()==0:
 					self.sigkill=True
 					break
-			self.queue.put(task,block=True,timeout=None)
+			try:
+				self.queue.put(task,block=False)
+			except queue.Full:
+				log.error(f'''Queue blocked due to tasks larger than size. \
+							  Failed Task {task['transaction']}:{task['username']} was thrown out.''')
+				continue
 			log.info(f"{task['transaction']}:{task['username']} failed, re-appending task.")
 
 def runTask(task) -> bool:
@@ -96,21 +112,35 @@ log.basicConfig(
 	level=log.INFO-10*DEBUG,
 	format='%(asctime)s %(threadName)s:%(levelname)s %(message)s'
 )
-log.warning('Started.')
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 taskList = queue.Queue(MAX_USERS)
+log.warning('Started.')
+try:
+	log.info('Press Control-C to skip random delay...')
+	sleep(random.random()*RAND_DELAY)
+except KeyboardInterrupt:
+	pass
+
 log.info(f'Reading config from {CONFIG}')
 config = json.load(open(CONFIG))
-for task in config.get('tasks', [{}]):
+for task in config.get('tasks', config.get('users', [{}])):
 	for k in ['username', 'password', 'transaction']:
 		task.setdefault(k, config.get(k))
 	for k in ['fields', 'conditions']:
 		task[k] = {**config.get(k, {}), **task.get(k, {})}
 	if task['transaction']:
-		taskList.put(task,block=True,timeout=None)
+		try:
+			taskList.put(task,block=False)
+		except queue.Full:
+			log.error(f'''Queue blocked due to tasks larger than size. \
+						  Task {task['transaction']}:{task['username']} was thrown out.''')
+			continue
 		log.info(f"{task['transaction']}:{task['username']} queued.")
 for _ in range(MAX_THREADS):
-	taskRunner(taskList).start()
-	sleep(INTERVAL)
+	if taskList.qsize()>0:
+		taskRunner(taskList).start()
+		sleep(INTERVAL)
+	elif taskList.qsize()==0:
+		break
 taskList.join()
 log.info('All Completed.')
