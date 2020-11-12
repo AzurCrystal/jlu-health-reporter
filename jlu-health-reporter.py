@@ -6,11 +6,11 @@ DEBUG = 0#+1
 CONFIG = sys.argv[1] if len(sys.argv)>1 else 'config.json' # take cli arg or default
 CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG) # relative to file
 # CONFIG = '/etc/jlu.conf' # force a config file here
-RETRIES = 100
-TIMEOUT = 2
-INTERVAL = 2
+RETRIES = 20
+TIMEOUT = 20
+INTERVAL = 10
 MAX_USERS = 64
-MAX_THREADS = 10
+MAX_THREADS = 5
 
 class taskRunner(threading.Thread):
 	def __init__(self,queue:queue.Queue) -> None:
